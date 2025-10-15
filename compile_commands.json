@@ -1,0 +1,7 @@
+[
+  {
+    "directory": "W:\\test-plugin",
+    "command" : "cl window\\src\\window.cpp /I lua\\include  /LD /MT /O2 /Fo:build\\",
+    "file" : "window\\src\\window.cpp"
+  }
+]
