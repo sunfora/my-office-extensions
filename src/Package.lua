@@ -5,6 +5,8 @@ return {
   extensionName = "Hello world!",
   extensionVersion = { major = 0, minor = 1, patch = 0, build = "test" },
 
+  eventsProvider = "cmd/events.lua",
+
 
   description="test",
 
