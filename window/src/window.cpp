@@ -1,16 +1,51 @@
 #include <windows.h>
 #include <windowsx.h>
 #include "lua.hpp"
-#include <stdio.h>;
+#include <stdio.h>
 
-HWND g_hwnd = NULL;
+lua_State* g_L;
+lua_State* cL;
+
+HWND g_Window = NULL;
+HWND g_ParentWindow = NULL;
+HWND g_Trigger = NULL;
+const char* g_EventDispatcherSignature = "QEventDispatcherWin32";
+HWND g_EventDispatcher = NULL;
+
+HWND Windows[1024] = {NULL};
+
+char CellValue[2000] = "";
+
 HANDLE g_hThread = NULL;
 DWORD g_threadId = 0;
+
+char g_ErrorMessage[4096] = "";
+
+int DocumentX = 0;
+int DocumentY = 0;
+
+int g_InvokedTimes = 0;
+
+int g_EditorAPI = LUA_NOREF;
+int g_Increase = LUA_NOREF;
+int g_Select = LUA_NOREF;
+int g_Context = LUA_NOREF;
 
 const int MAX_KEYS_PRESSED = 7;
 char KeysPressed[] = {0, 0, 0, 0, 0, 0, 0};
 int CurrentKey = 0;
 int PressedTotal = 0;
+
+BOOL CALLBACK etwc(HWND Window, LPARAM param) {
+  HWND** result = (HWND**) param;
+  char buffer[2028];
+  GetClassNameA(Window, buffer, sizeof(buffer));
+
+  **result = Window;
+  *result += 1;
+
+  return TRUE;
+}
 
 POINT Mouse = {0, 0};
 
@@ -54,10 +89,143 @@ void RenderScene(HDC Context, HWND Window) {
     TextOutA(Context, 120 + 60 + i * 20 + 16, 100, comma, 1);
   }
 
-  char buffer[128];
+  char buffer[5000];
   sprintf_s(buffer, "Mouse: %d %d", Mouse.x, Mouse.y);
   TextOutA(Context, 60, 180, buffer, strlen(buffer));
+
+  sprintf_s(buffer, "Trigger: %p", g_Trigger);
+  TextOutA(Context, 60, 200, buffer, strlen(buffer));
+
+  sprintf_s(buffer, "ParentWindow: %p %p", g_ParentWindow, GetWindow(g_Window, GW_OWNER));
+  TextOutA(Context, 60, 220, buffer, strlen(buffer));
+
+  sprintf_s(buffer, "EventDispatcher: %p", g_EventDispatcher);
+  TextOutA(Context, 60, 240, buffer, strlen(buffer));
+
+  void* ThreadId = (void*) (long long) GetCurrentThreadId();
+  sprintf_s(buffer, "Thread: %p", ThreadId);
+  TextOutA(Context, 60, 260, buffer, strlen(buffer));
+  
+  const char * lua_value;
+  if (g_L) {
+        int top = lua_gettop(g_L);
+        lua_getglobal(g_L, "MY_GLOBAL_TEST_STRING");
+        
+        if (lua_isstring(g_L, -1)) {
+            lua_value = lua_tostring(g_L, -1);
+        } else {
+            lua_value = "MY_GLOBAL_TEST_STRING is not a string (or is nil)";
+        }
+        lua_settop(g_L, top);
+    } else {
+        lua_value = "gL is NULL";
+    }
+
+    // Рисуем полученное значение в нашем окне
+    const char* prefix = "Global from Lua: ";
+    TextOutA(Context, 60, 280, prefix, strlen(prefix));
+    TextOutA(Context, 60 + 10 * strlen(prefix), 280, lua_value, strlen(lua_value));
+
+    // sprintf_s(buffer, "g_BoxFunction: %p", g_MessageBoxFunction);
+    // TextOutA(Context, 60, 280, buffer, strlen(buffer));
+
+    sprintf_s(buffer, "InvokedTimes [%d] ErrorMessage: `%s` Value: [%s]", g_InvokedTimes, g_ErrorMessage, CellValue);
+    TextOutA(Context, 60, 320, buffer, strlen(buffer));
+    
+    HWND* p = Windows;
+    HWND** t = &p;
+    EnumThreadWindows(GetCurrentThreadId(), etwc, (LPARAM) t);
+    **t = NULL;
+
+    for (int i = 0; Windows[i] != NULL; ++i) {
+      sprintf_s(buffer, "Found Window: [%d] %p", i, Windows[i]);
+      TextOutA(Context, 60, 340 + i * 20, buffer, strlen(buffer));
+    }
 }
+
+
+
+void InvokeMessageBox(const char* name="default") {
+  if (g_L && (g_EditorAPI != LUA_NOREF)) {
+    int top = lua_gettop(g_L);
+
+    lua_rawgeti(g_L, LUA_REGISTRYINDEX, g_EditorAPI);
+    lua_getfield(g_L, -1, "messageBox");
+
+    char buffer[400];
+    sprintf_s(buffer, "this EditorAPI.messageBox is invoked by C++: %d", g_InvokedTimes);
+    lua_pushstring(g_L, buffer);
+    lua_pushstring(g_L, name);
+
+    if (lua_pcall(g_L, 2, 0, 0) != LUA_OK) {
+      strcpy(g_ErrorMessage, lua_tostring(g_L, -1));
+    }
+    g_InvokedTimes += 1;
+
+    lua_settop(g_L, top);
+  }
+}
+
+void SelectCell() {
+  if (g_L && (g_Select != LUA_NOREF) 
+          && (g_EditorAPI != LUA_NOREF) 
+          && (g_Context != LUA_NOREF)) {
+    int top = lua_gettop(g_L);
+    
+    lua_rawgeti(g_L, LUA_REGISTRYINDEX, g_Select);
+
+    lua_rawgeti(g_L, LUA_REGISTRYINDEX, g_EditorAPI);
+    lua_rawgeti(g_L, LUA_REGISTRYINDEX, g_Context);
+    lua_pushinteger(g_L, DocumentX);
+    lua_pushinteger(g_L, DocumentY);
+
+    if (lua_pcall(g_L, 4, 1, 0) != LUA_OK) {
+      strcpy(g_ErrorMessage, lua_tostring(g_L, -1));
+    }
+    // strcpy(CellValue, lua_tostring(g_L, -1));
+
+    g_InvokedTimes += 1;
+
+    lua_settop(g_L, top);
+  } else {
+    sprintf_s(g_ErrorMessage, 
+        "g_Increase: [%d], g_EditorAPI [%d], g_Document [%d]", 
+        g_Select, g_EditorAPI, g_Context);
+  }
+  SetFocus(g_ParentWindow);
+  SetFocus(g_Window);
+}
+
+void IncreaseValue() {
+  if (g_L && (g_Increase != LUA_NOREF) 
+          && (g_EditorAPI != LUA_NOREF) 
+          && (g_Context != LUA_NOREF)) {
+    int top = lua_gettop(g_L);
+    
+    lua_rawgeti(g_L, LUA_REGISTRYINDEX, g_Increase);
+
+    lua_rawgeti(g_L, LUA_REGISTRYINDEX, g_EditorAPI);
+    lua_rawgeti(g_L, LUA_REGISTRYINDEX, g_Context);
+    lua_pushinteger(g_L, DocumentX);
+    lua_pushinteger(g_L, DocumentY);
+
+    if (lua_pcall(g_L, 4, 1, 0) != LUA_OK) {
+      strcpy(g_ErrorMessage, lua_tostring(g_L, -1));
+    }
+    // strcpy(CellValue, lua_tostring(g_L, -1));
+
+    g_InvokedTimes += 1;
+
+    lua_settop(g_L, top);
+  } else {
+    sprintf_s(g_ErrorMessage, 
+        "g_Increase: [%d], g_EditorAPI [%d], g_Document [%d]", 
+        g_Increase, g_EditorAPI, g_Context);
+  }
+  SetFocus(g_ParentWindow);
+  SetFocus(g_Window);
+}
+
 
 LRESULT CALLBACK WndProc(HWND Window, UINT msg, WPARAM WParam, LPARAM LParam) {
   switch (msg) {
@@ -70,14 +238,34 @@ LRESULT CALLBACK WndProc(HWND Window, UINT msg, WPARAM WParam, LPARAM LParam) {
     }
     case WM_KEYDOWN: {
       char Pressed = (char) WParam;
+      if (Pressed == ' ') {
+        IncreaseValue();
+      }
       if (isalnum(Pressed)) {
         KeysPressed[CurrentKey] = Pressed;
 
         CurrentKey += 1;
         PressedTotal += 1;
         CurrentKey %= MAX_KEYS_PRESSED;
+        
+        if (Pressed == 'W') {
+          if (DocumentY > 0) {
+            DocumentY -= 1;
+            SelectCell();
+          }
+        } else if (Pressed == 'A') {
+          if (DocumentX > 0) {
+            DocumentX -= 1;
+            SelectCell();
+          }
+        } else if (Pressed == 'D') {
+          DocumentX += 1;
+          SelectCell();
+        } else if (Pressed == 'S') {
+          DocumentY += 1;
+          SelectCell();
+        }
       }
-
       InvalidateRect(Window, NULL, TRUE);
       break;
     }
@@ -86,8 +274,8 @@ LRESULT CALLBACK WndProc(HWND Window, UINT msg, WPARAM WParam, LPARAM LParam) {
       break;
     }
     case WM_DESTROY: {
-      g_hwnd = NULL;
-      PostQuitMessage(0);
+      g_Window = NULL;
+      // PostQuitMessage(0);
       break;
     }
     case WM_PAINT: {
@@ -115,6 +303,10 @@ LRESULT CALLBACK WndProc(HWND Window, UINT msg, WPARAM WParam, LPARAM LParam) {
       EndPaint(Window, &Paint);
       break;
     }
+    case WM_LBUTTONDOWN: {
+      InvalidateRect(Window, NULL, TRUE);
+      break;
+    }
     default: {
       return DefWindowProcA(Window, msg, WParam, LParam);
     }
@@ -123,8 +315,51 @@ LRESULT CALLBACK WndProc(HWND Window, UINT msg, WPARAM WParam, LPARAM LParam) {
 }
 
 
-DWORD WINAPI WindowThread(LPVOID LParam) {
-  static const char* ClassName = "template-plugin-class"; 
+////////////////////////////
+// Lua interfaces 
+// TODO(ivan)
+//
+
+
+static int lua_OpenWindow(lua_State *L) {
+  g_ParentWindow = FindWindowA("Qt51510QWindowIcon", NULL);
+  HWND* p = &(Windows[0]);
+  HWND** t = & p;
+  EnumThreadWindows(GetCurrentThreadId(), etwc, (LPARAM) t);
+
+  if (g_Window != NULL) {
+    cL = L;
+    //lua_pushstring(L, "Window is already open");
+    //return lua_error(L);
+    return 0;
+  }
+  g_L = L;
+  
+  lua_pushvalue(L, 1);
+  g_Context = luaL_ref(L, LUA_REGISTRYINDEX);
+
+  lua_getglobal(L, "EditorAPI");
+  if (lua_istable(L, -1)) {
+    g_EditorAPI = luaL_ref(L, LUA_REGISTRYINDEX);
+  } else {
+    lua_pop(L, 1);
+  }
+
+  lua_getglobal(L, "updateNumber");
+  if (lua_isfunction(L, -1)) {
+    g_Increase = luaL_ref(L, LUA_REGISTRYINDEX);
+  } else {
+    lua_pop(L, 1);
+  }
+
+  lua_getglobal(L, "select");
+  if (lua_isfunction(L, -1)) {
+    g_Select = luaL_ref(L, LUA_REGISTRYINDEX);
+  } else {
+    lua_pop(L, 1);
+  }
+  
+  static const char* ClassName = "test-plugin"; 
   HINSTANCE HInstance = GetModuleHandleA(NULL);
 
   WNDCLASSEXA Wc = {0};
@@ -145,67 +380,49 @@ DWORD WINAPI WindowThread(LPVOID LParam) {
       CW_USEDEFAULT,             //             - use some default position TODO(ivan): should be something elese
       400,                       //             - width TODO(ivan): should be something else
       300,                       //             - height TODO(ivan): should be something else
-      NULL,                      //             - parent_window TODO(ivan): currently none, change it
+      g_ParentWindow,            //             - parent_window 
       NULL,                      //             - menu (no menu right now)
       HInstance,                 //             - app instance TODO(ivan): maybe change it
       NULL                       //             - some user data
   );
 
 
+
   if (HandleToWindow == NULL) {
     return 1;
   }
+  // SetParent(HandleToWindow, g_ParentWindow);
 
-  g_hwnd = HandleToWindow;
+  g_Window = HandleToWindow;
 
-  ShowWindow(g_hwnd, SW_SHOW);
-  UpdateWindow(g_hwnd);
-
-  MSG msg;
-  while (GetMessageA(&msg, NULL, 0, 0) > 0) {
-    TranslateMessage(&msg);
-    DispatchMessage(&msg);
+  if (g_Window== NULL) {
+    lua_pushstring(L, "Failed to create window");
+    lua_error(L);
   }
- 
-  // some clean up when we finish
-  g_hwnd = NULL;
-  CloseHandle(g_hThread);
-  g_hThread = NULL;
-  g_threadId = 0;
+
+  ShowWindow(g_Window, SW_SHOW);
+  UpdateWindow(g_Window);
+
+  // InvokeMessageBox();
 
   return 0;
 }
 
-////////////////////////////
-// Lua interfaces 
-// TODO(ivan)
-//
-
-static int lua_OpenWindow(lua_State *L) {
-  if (g_hThread != NULL) {
-    lua_pushstring(L, "Window is already open");
-    return lua_error(L);
-  }
-
-  g_hThread = CreateThread(
-      NULL, 0, WindowThread, NULL, 0, &g_threadId
-  );
-
-  if (g_hThread == NULL) {
-    lua_pushstring(L, "Failed to create thread");
-    lua_error(L);
-  }
-
+static int lua_ReplaceContext(lua_State *L) {
+  g_Context = LUA_NOREF;
+  lua_pushvalue(L, 1);
+  g_Context = luaL_ref(L, LUA_REGISTRYINDEX);
   return 0;
 }
 
 static int lua_CloseWindow(lua_State *L) {
-  if (g_hThread == NULL || g_hwnd == NULL) {
+  if (g_Window == NULL) {
     return 0;
   }
 
-  PostMessageA(g_hwnd, WM_CLOSE, 0, 0);
-  WaitForSingleObject(g_hThread, 2000);
+  PostMessageA(g_Window, WM_CLOSE, 0, 0);
+  // WaitForSingleObject(g_hThread, 2000);
+  g_Window = NULL;
 
   return 0;
 } 
@@ -213,6 +430,7 @@ static int lua_CloseWindow(lua_State *L) {
 static const struct luaL_Reg window_functions[] = {
   { "open", lua_OpenWindow },
   { "close", lua_CloseWindow },
+  { "replaceContext", lua_ReplaceContext },
   { NULL, NULL }
 };
 
